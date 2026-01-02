@@ -2,35 +2,45 @@
 
 
 def __entry():
-	import multiprocessing
 	import subprocess
 	import importlib
+	import threading
 	import inspect
 	import pathlib
 	import sys
+	import os
 	import re
 
-	c_dependencies = ["requests"]
-	c_sources = []
+	CFG_DEPENDENCIES = ["requests"]
+	CFG_VENV_NAME = ".py-venv"
+	CFG_SOURCES = []
 
-	c_metadata_regex = re.compile(r"(\w+):.*?(\S+)")
-	c_comment_regex = re.compile(r"\#.*")
-	c_block_regex = re.compile(r"#\s*-<[\s\S]*#\s*>-")
-	c_venv_name = ".py-venv"
+	REGEX_METADATA = re.compile(r"(\w+):.*?(\S+)")
+	REGEX_COMMENT = re.compile(r"\#.*")
+	REGEX_BLOCK = re.compile(r"#\s*-<[\s\S]*#\s*>-")
+
+	SELF_MODULE = sys.modules[__name__]
+	SELF_SOURCE = inspect.getsource(SELF_MODULE)
+	SELF_PATH = pathlib.Path(inspect.getfile(SELF_MODULE))
+	SELF_CURR_DIR = pathlib.Path.cwd()
+
+	VENV_PATH = SELF_CURR_DIR.joinpath(CFG_VENV_NAME)
+	VENV_PATH_REL = CFG_VENV_NAME
+
+	if os.name == "nt":
+		VENV_PATH_PYTHON = f"{VENV_PATH_REL}/Scripts/python.exe"
+	else:
+		VENV_PATH_PYTHON = f"{VENV_PATH_REL}/bin/python"
+
+	VENV_ENABLED = pathlib.Path(sys.executable) == SELF_CURR_DIR.joinpath(VENV_PATH_PYTHON)
 
 	g_metadata = {}
-	g_module = sys.modules[__name__]
-	g_source = inspect.getsource(g_module)
-	g_file = pathlib.Path(inspect.getfile(g_module))
-
-	g_venv_path = g_file.parent.joinpath(c_venv_name)
-	g_venv_path_abs = g_venv_path.absolute()
-	g_venv_path_python = f"{g_venv_path_abs}/bin/python"
-	g_venv_exists = g_venv_path.exists()
-	g_venv_enabled = sys.executable == g_venv_path_python
+	g_venv_exists = VENV_PATH.exists()
 
 	def msg(val):
 		pass
+
+	msg(f"{VENV_ENABLED} {pathlib.Path(sys.executable)} {SELF_CURR_DIR.joinpath(VENV_PATH_PYTHON)}")
 
 	def safe_exec(procedure, *args, **kwargs):
 		try:
@@ -41,7 +51,7 @@ def __entry():
 	def shell(cmd):
 		return safe_exec(
 			subprocess.check_output,
-			cmd.split(),
+			cmd,
 			stderr = subprocess.PIPE,
 			shell = False,
 		)
@@ -54,46 +64,64 @@ def __entry():
 			return result
 
 	def get_metadata(source, table):
-		for block in c_block_regex.findall(source):
-			for comment in c_comment_regex.findall(block):
-				for name, value in c_metadata_regex.findall(comment):
+		for block in REGEX_BLOCK.findall(source):
+			for comment in REGEX_COMMENT.findall(block):
+				for name, value in REGEX_METADATA.findall(comment):
 					table[name] = value
 
 		return table
 
-	def core_routine():
-		nonlocal g_venv_enabled, g_venv_exists
+	def prepare_environment():
+		nonlocal g_venv_exists
 
-		if not g_venv_enabled and not g_venv_exists:
-			result = shell(f"{sys.executable} -m venv {g_venv_path_abs}")
+		if not VENV_ENABLED and not g_venv_exists:
+			result = shell([sys.executable, "-m", "venv", VENV_PATH_REL])
 
 			if isinstance(result, subprocess.CalledProcessError):
 				msg(f"Failed to create venv: {result} {result.__dict__}")
 			else:
+				msg(f"Created venv at {VENV_PATH_REL}")
 				g_venv_exists = True
 
-		if g_venv_exists and not g_venv_enabled:
-			msg(f"Starting new instance with venv at {g_venv_path_abs}")
-			result = shell(f"{g_venv_path_python} {g_file.absolute()}")
-			result = isinstance(result, bytes) and result.decode() or ""
-			msg(f"Result: {result}")
+	def core_routine():
+		prepare_environment()
+
+		msg(f"{sys.executable} {VENV_PATH_PYTHON}")
+		if g_venv_exists and not VENV_ENABLED:
+			msg(f"Starting new instance with venv at {VENV_PATH_REL}")
+
+			result = safe_exec(
+				subprocess.Popen,
+				[VENV_PATH_PYTHON, SELF_PATH.absolute()],
+				stdout = subprocess.DEVNULL,
+				stderr = subprocess.DEVNULL,
+				start_new_session = False,
+			)
+
+			if not isinstance(result, subprocess.Popen):
+				msg(f"Failed: {result}")
+			else:
+				status = result.poll()
+				if status is None:
+					msg("Running")
+				else:
+					msg(f"Returned status: {status}")
+
 			return
 
-		get_metadata(g_source, g_metadata)
-
 		if g_venv_exists:
-			install_fmt = f"{g_venv_path_abs}/bin/pip install {{}}"
+			python_bin = VENV_PATH_PYTHON
 		else:
-			install_fmt = f"{sys.executable} -m pip install {{}}"
+			python_bin = sys.executable
 
 		msg("Installing dependencies")
-		for dep in c_dependencies:
+		for dep in CFG_DEPENDENCIES:
 			if get_module(dep):
 				msg(f"\tSkipping: {dep}")
 				continue
 
 			msg(f"\tInstalling: {dep}")
-			result = shell(install_fmt.format(dep))
+			result = shell([python_bin, "-m", "pip", "install", dep])
 
 			if not isinstance(result, subprocess.CalledProcessError):
 				msg(f"\t{dep}: {result}")
@@ -102,10 +130,12 @@ def __entry():
 			else:
 				msg(f"\t{dep}: Install issue {result} {result.__dict__}")
 
+		get_metadata(SELF_SOURCE, g_metadata)
+
 		module_dict = {}
 
 		msg("Loading dependencies")
-		for dep in c_dependencies:
+		for dep in CFG_DEPENDENCIES:
 			result = get_module(dep)
 
 			msg(f"\t{dep}: {result}")
@@ -115,7 +145,7 @@ def __entry():
 		newest_revision = int(g_metadata["REV"])
 		newest_source = None
 
-		for source in c_sources:
+		for source in CFG_SOURCES:
 			msg(f"Checking {source}")
 			for i in range(3):
 				try:
@@ -133,10 +163,10 @@ def __entry():
 		if newest_source:
 			msg(f"Trying to update from revision {current_revision} to {newest_revision}")
 			try:
-				g_file.write_text(
-					c_block_regex.sub(
+				SELF_PATH.write_text(
+					REGEX_BLOCK.sub(
 						newest_source.replace('\r', '').replace("\\", "\\\\"),
-						g_file.read_text(),
+						SELF_PATH.read_text(),
 						re.MULTILINE,
 					)
 				)
@@ -152,15 +182,18 @@ def __entry():
 		for key, val in module_dict.items():
 			locals()[key] = val
 
+		main_thread = threading.main_thread()
 		import time
 
-		while True:
+		while main_thread.is_alive():
 			msg("Heartbeat")
 			time.sleep(5)
 
-	if not g_venv_enabled:
-		__proc = multiprocessing.Process(target = core_routine)
-		__proc.start()
+		main_thread.join()
+
+	if not VENV_ENABLED:
+		__thread = threading.Thread(target = core_routine)
+		__thread.start()
 	else:
 		core_routine()
 
