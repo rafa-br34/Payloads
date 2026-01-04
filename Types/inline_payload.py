@@ -83,10 +83,6 @@ def __entry():
 				msg(f"Created venv at {VENV_PATH_REL}")
 				g_venv_exists = True
 
-	def core_routine():
-		prepare_environment()
-
-		msg(f"{sys.executable} {VENV_PATH_PYTHON}")
 		if g_venv_exists and not VENV_ENABLED:
 			msg(f"Starting new instance with venv at {VENV_PATH_REL}")
 
@@ -107,12 +103,16 @@ def __entry():
 				else:
 					msg(f"Returned status: {status}")
 
-			return
+			return True
 
 		if g_venv_exists:
 			python_bin = VENV_PATH_PYTHON
 		else:
 			python_bin = sys.executable
+
+		msg("Installing/upgrading pip and setuptools")
+		result = shell([python_bin, "-m", "pip", "install", "--upgrade", "pip", "setuptools"])
+		msg(f"Result: {result}")
 
 		msg("Installing dependencies")
 		for dep in CFG_DEPENDENCIES:
@@ -129,6 +129,12 @@ def __entry():
 				msg(f"\t{dep}: Environment issue {result} {result.__dict__}")
 			else:
 				msg(f"\t{dep}: Install issue {result} {result.__dict__}")
+
+		return False
+
+	def core_routine():
+		if prepare_environment():
+			return
 
 		get_metadata(SELF_SOURCE, g_metadata)
 
